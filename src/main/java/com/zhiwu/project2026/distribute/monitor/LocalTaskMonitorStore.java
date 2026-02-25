@@ -28,7 +28,7 @@ public class LocalTaskMonitorStore {
 
     // ================= lifecycle =================
 
-    public void recordStart(String taskId, long periodSec, long startMs) {
+    public void recordStart(String taskId, long startMs) {
         running.put(taskId, new TaskRecord(startMs));
     }
 
@@ -69,22 +69,16 @@ public class LocalTaskMonitorStore {
     /**
      * 返回最近 N 条完成记录（fail 优先靠前或按 endMs 排序你可自行选择）
      */
-    public List<TaskRecord> listRecentCompleted(String taskId, int limit) {
-        if (limit <= 0) {
-            return List.of();
-        }
+    public List<TaskRecord> listRecentCompleted(String taskId) {
+
 
         var s = successHist.getOrDefault(taskId, new ConcurrentLinkedDeque<>());
         var f = failHist.getOrDefault(taskId, new ConcurrentLinkedDeque<>());
 
         // 简单策略：合并后按 endMs 倒序（排障调用，O(n log n) 可接受）
-        List<TaskRecord> all = new ArrayList<>(Math.min(limit, s.size() + f.size()));
+        List<TaskRecord> all = new ArrayList<>(s.size() + f.size());
         all.addAll(s);
         all.addAll(f);
-        all.sort((a, b) -> Long.compare(b.getEndMs(), a.getEndMs()));
-        if (all.size() > limit) {
-            all.subList(limit, all.size()).clear();
-        }
         return all;
     }
 
