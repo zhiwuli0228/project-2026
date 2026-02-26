@@ -69,4 +69,32 @@ class FeedbackSizingControllerTest {
         assertEquals(18, cooldownDecision.targetCorePoolSize());
         assertEquals(1800, cooldownDecision.targetQueueCapacity());
     }
+
+    @Test
+    void shouldNotEnterCooldownWhenUpscaleBlockedByMaxCore() {
+        FeedbackControlState state = new FeedbackControlState();
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        FeedbackMetrics highQueue = new FeedbackMetrics(130, 220, 0.92, 0.0, 0.60, 80);
+
+        controller.decide(64, highQueue, state, now);
+        controller.decide(64, highQueue, state, now.plusSeconds(30));
+        FeedbackSizingDecision blocked = controller.decide(64, highQueue, state, now.plusSeconds(60));
+        FeedbackSizingDecision next = controller.decide(64, highQueue, state, now.plusSeconds(90));
+
+        assertEquals(ScalingAction.HOLD_STABLE, blocked.action());
+        assertEquals(ScalingAction.HOLD_STABLE, next.action());
+    }
+
+    @Test
+    void shouldNotEnterCooldownWhenDownscaleBlockedByMinCore() {
+        FeedbackControlState state = new FeedbackControlState();
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        FeedbackMetrics heapHigh = new FeedbackMetrics(20, 100, 0.3, 0.0, 0.90, 50);
+
+        FeedbackSizingDecision blocked = controller.decide(2, heapHigh, state, now);
+        FeedbackSizingDecision next = controller.decide(2, heapHigh, state, now.plusSeconds(30));
+
+        assertEquals(ScalingAction.HOLD_STABLE, blocked.action());
+        assertEquals(ScalingAction.HOLD_STABLE, next.action());
+    }
 }

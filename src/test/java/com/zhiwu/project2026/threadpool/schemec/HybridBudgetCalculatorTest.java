@@ -76,4 +76,24 @@ class HybridBudgetCalculatorTest {
         assertEquals(5, low.coreMin());
         assertEquals(3, high.coreMin());
     }
+
+    @Test
+    void shouldKeepQueueMaxNotLowerThanCoreLinkedLowerBound() {
+        HybridBudgetInput input = new HybridBudgetInput(
+                512L * 1024 * 1024,
+                4,
+                128L * 1024 * 1024,
+                128L * 1024 * 1024,
+                8
+        );
+
+        HybridBudgetPlan plan = calculator.calculate(input);
+
+        int targetPerThread = Math.max(config.queuePerThreadLower(), Math.min(100, config.queuePerThreadUpper()));
+        int expectedFloor = plan.coreMax() > config.hardMinCore()
+                ? Math.max(plan.coreMax() * targetPerThread, config.hardMinQueue())
+                : config.hardMinQueue();
+        assertEquals(expectedFloor, plan.queueMax());
+        assertEquals(100, plan.queueMin());
+    }
 }

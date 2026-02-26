@@ -1,11 +1,13 @@
 package com.zhiwu.project2026.threadpool.schemea;
 
+import java.util.Objects;
+
 public class RuleBasedSizingCalculator {
 
     private final RuleBasedSizingConfig config;
 
     public RuleBasedSizingCalculator(RuleBasedSizingConfig config) {
-        this.config = config;
+        this.config = Objects.requireNonNull(config, "config");
     }
 
     public SizingPlan calculate(SizingInput input) {
@@ -20,8 +22,9 @@ public class RuleBasedSizingCalculator {
         int core = clamp(config.minCore(),
                 (int) Math.floor(Math.min(baseCore, memBoundCore) * replicaFactor),
                 config.maxCore());
+        long rawQueue = (long) core * config.queuePerThread();
         int queue = clamp(config.minQueue(),
-                core * config.queuePerThread(),
+                (int) Math.min(Integer.MAX_VALUE, rawQueue),
                 config.maxQueue());
 
         return new SizingPlan(core, queue);
@@ -31,4 +34,3 @@ public class RuleBasedSizingCalculator {
         return Math.min(max, Math.max(min, value));
     }
 }
-

@@ -4,6 +4,8 @@ import java.util.Objects;
 
 public class HybridBudgetCalculator {
 
+    private static final int DEFAULT_TARGET_QUEUE_PER_THREAD = 100;
+
     private final HybridSizingConfig config;
 
     public HybridBudgetCalculator(HybridSizingConfig config) {
@@ -26,7 +28,7 @@ public class HybridBudgetCalculator {
 
         double scaleFactor = Math.pow((double) config.referenceReplica() / input.replicaCount(), config.alpha());
         int scaledCoreMin = clamp(config.hardMinCore(),
-                (int) Math.floor(baseCoreMin * scaleFactor),
+                (int) Math.ceil(baseCoreMin * scaleFactor),
                 config.hardMaxCore());
         int scaledCoreMax = clamp(config.hardMinCore(),
                 (int) Math.floor(baseCoreMax * scaleFactor),
@@ -41,6 +43,15 @@ public class HybridBudgetCalculator {
                 queueMaxByMem,
                 scaledCoreMax * config.queuePerThreadUpper()
         );
+        int queueTargetPerThread = clamp(
+                config.queuePerThreadLower(),
+                DEFAULT_TARGET_QUEUE_PER_THREAD,
+                config.queuePerThreadUpper()
+        );
+        int queueMaxFloorByCore = scaledCoreMax > config.hardMinCore()
+                ? scaledCoreMax * queueTargetPerThread
+                : config.hardMinQueue();
+        queueMax = Math.max(queueMax, queueMaxFloorByCore);
         queueMax = clamp(config.hardMinQueue(), queueMax, config.hardMaxQueue());
 
         int queueMin = Math.max(config.hardMinQueue(), scaledCoreMin * config.queuePerThreadLower());

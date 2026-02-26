@@ -93,6 +93,7 @@ public class ResizableCapacityBlockingQueue<E> implements BlockingQueue<E> {
     @Override
     public boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
         Objects.requireNonNull(e, "element");
+        Objects.requireNonNull(unit, "unit");
         long nanos = unit.toNanos(timeout);
         lock.lockInterruptibly();
         try {
@@ -127,6 +128,7 @@ public class ResizableCapacityBlockingQueue<E> implements BlockingQueue<E> {
 
     @Override
     public E poll(long timeout, TimeUnit unit) throws InterruptedException {
+        Objects.requireNonNull(unit, "unit");
         long nanos = unit.toNanos(timeout);
         lock.lockInterruptibly();
         try {
@@ -367,4 +369,3 @@ public class ResizableCapacityBlockingQueue<E> implements BlockingQueue<E> {
         }
     }
 }
-

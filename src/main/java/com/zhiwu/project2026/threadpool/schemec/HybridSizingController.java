@@ -1,14 +1,37 @@
 package com.zhiwu.project2026.threadpool.schemec;
 
+import com.zhiwu.project2026.threadpool.gating.DefaultScaleUpGate;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGate;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateConfig;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateInput;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateVerdict;
+
 import java.time.Instant;
 import java.util.Objects;
 
 public class HybridSizingController {
 
     private final HybridSizingConfig config;
+    private final ScaleUpGate scaleUpGate;
 
     public HybridSizingController(HybridSizingConfig config) {
+        this(
+                config,
+                new DefaultScaleUpGate(
+                        new ScaleUpGateConfig(
+                                config.targetQueueWaitP95Ms(),
+                                config.busyThreadRatioThreshold(),
+                                config.heapGuardLow(),
+                                config.gcPauseP95MsThreshold(),
+                                config.consecutiveQueueBreachThreshold()
+                        )
+                )
+        );
+    }
+
+    public HybridSizingController(HybridSizingConfig config, ScaleUpGate scaleUpGate) {
         this.config = Objects.requireNonNull(config, "config");
+        this.scaleUpGate = Objects.requireNonNull(scaleUpGate, "scaleUpGate");
     }
 
     public HybridSizingDecision decide(
@@ -26,12 +49,6 @@ public class HybridSizingController {
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(now, "now");
 
-        if (metrics.queueWaitP95Ms() > config.targetQueueWaitP95Ms()) {
-            state.incrementQueueWaitBreaches();
-        } else {
-            state.resetQueueWaitBreaches();
-        }
-
         int clampedCurrentCore = clamp(budget.coreMin(), currentCorePoolSize, budget.coreMax());
         int step = Math.max(1, (int) Math.floor(clampedCurrentCore * config.maxStepRatio()));
 
@@ -47,6 +64,9 @@ public class HybridSizingController {
         if (metrics.heapUsedRatio() > config.heapGuardHigh()
                 || metrics.gcPauseP95Ms() > config.gcPauseP95MsThreshold()) {
             int targetCore = clamp(budget.coreMin(), clampedCurrentCore - step, budget.coreMax());
+            if (targetCore == clampedCurrentCore) {
+                return holdStable(clampedCurrentCore, budget, "downscale blocked at coreMin");
+            }
             state.setLastAdjustmentAt(now);
             state.resetQueueWaitBreaches();
             return new HybridSizingDecision(
@@ -57,27 +77,31 @@ public class HybridSizingController {
             );
         }
 
-        boolean shouldScaleUp = state.getConsecutiveQueueWaitBreaches() >= config.consecutiveQueueBreachThreshold()
-                && metrics.activeRatio() >= config.busyThreadRatioThreshold()
-                && metrics.heapUsedRatio() < config.heapGuardLow();
-        if (shouldScaleUp) {
+        ScaleUpGateVerdict gateVerdict = scaleUpGate.evaluate(
+                new ScaleUpGateInput(
+                        metrics.queueWaitP95Ms(),
+                        metrics.activeRatio(),
+                        metrics.heapUsedRatio(),
+                        metrics.gcPauseP95Ms()
+                ),
+                state.getScaleUpGateState()
+        );
+        if (gateVerdict.allowScaleUp()) {
             int targetCore = clamp(budget.coreMin(), clampedCurrentCore + step, budget.coreMax());
+            if (targetCore == clampedCurrentCore) {
+                return holdStable(clampedCurrentCore, budget, "upscale blocked at coreMax");
+            }
             state.setLastAdjustmentAt(now);
             state.resetQueueWaitBreaches();
             return new HybridSizingDecision(
                     targetCore,
                     queueByCoreWithinBudget(targetCore, budget),
                     HybridScalingAction.SCALE_UP,
-                    "queue wait breach persisted"
+                    "scale-up gate passed"
             );
         }
 
-        return new HybridSizingDecision(
-                clampedCurrentCore,
-                queueByCoreWithinBudget(clampedCurrentCore, budget),
-                HybridScalingAction.HOLD_STABLE,
-                "no scaling condition met"
-        );
+        return holdStable(clampedCurrentCore, budget, "scale-up gate blocked: " + gateVerdict.reason());
     }
 
     private boolean cooldownPassed(HybridControlState state, Instant now) {
@@ -89,6 +113,15 @@ public class HybridSizingController {
         int targetRatio = (config.queuePerThreadLower() + config.queuePerThreadUpper()) / 2;
         int estimatedQueue = corePoolSize * targetRatio;
         return clamp(budget.queueMin(), estimatedQueue, budget.queueMax());
+    }
+
+    private HybridSizingDecision holdStable(int corePoolSize, HybridBudgetPlan budget, String reason) {
+        return new HybridSizingDecision(
+                corePoolSize,
+                queueByCoreWithinBudget(corePoolSize, budget),
+                HybridScalingAction.HOLD_STABLE,
+                reason
+        );
     }
 
     private int clamp(int min, int value, int max) {

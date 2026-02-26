@@ -1,5 +1,9 @@
 package com.zhiwu.project2026.threadpool.schemea;
 
+import com.zhiwu.project2026.threadpool.gating.DefaultScaleUpGate;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateConfig;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateInput;
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateState;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.ThreadPoolExecutor;
@@ -7,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuleBasedThreadPoolManagerTest {
@@ -71,5 +76,44 @@ class RuleBasedThreadPoolManagerTest {
         assertEquals(250, queue.getCapacity());
         assertTrue(result.queueShrinkDeferred());
     }
-}
 
+    @Test
+    void shouldRejectNullArguments() {
+        RuleBasedThreadPoolManager manager =
+                new RuleBasedThreadPoolManager(new RuleBasedSizingCalculator(config));
+        ResizableCapacityBlockingQueue<Runnable> queue = new ResizableCapacityBlockingQueue<>(10);
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 60, TimeUnit.SECONDS, queue);
+        SizingInput input = new SizingInput(1024, 1, 1, 1);
+
+        assertThrows(NullPointerException.class, () -> manager.reconcile(null, queue, input));
+        assertThrows(NullPointerException.class,
+                () -> manager.reconcile(executor, (ResizableCapacityBlockingQueue<Runnable>) null, input));
+        assertThrows(NullPointerException.class, () -> manager.reconcile(executor, queue, null));
+        assertThrows(NullPointerException.class, () -> new RuleBasedThreadPoolManager(null));
+    }
+
+    @Test
+    void shouldBlockScaleUpWhenUnifiedGateNotPassed() {
+        RuleBasedThreadPoolManager manager = new RuleBasedThreadPoolManager(
+                new RuleBasedSizingCalculator(config),
+                new DefaultScaleUpGate(new ScaleUpGateConfig(100, 0.85, 0.75, 200, 3))
+        );
+        ResizableCapacityBlockingQueue<Runnable> queue = new ResizableCapacityBlockingQueue<>(500);
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(2, 2, 60, TimeUnit.SECONDS, queue);
+        SizingInput input = new SizingInput(
+                8L * 1024 * 1024 * 1024,
+                4,
+                32L * 1024 * 1024,
+                8
+        );
+        ScaleUpGateState gateState = new ScaleUpGateState();
+        ScaleUpGateInput lowPressure = new ScaleUpGateInput(20, 0.3, 0.5, 30);
+
+        AppliedSizingResult result = manager.reconcile(executor, queue, input, lowPressure, gateState);
+
+        assertEquals(2, result.planned().corePoolSize());
+        assertEquals(500, result.planned().queueCapacity());
+        assertEquals(2, executor.getCorePoolSize());
+        assertEquals(500, queue.getCapacity());
+    }
+}

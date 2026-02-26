@@ -79,5 +79,35 @@ class RuleBasedSizingCalculatorTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new SizingInput(1, 0, 1, 1));
     }
-}
 
+    @Test
+    void shouldRejectNullConfig() {
+        assertThrows(NullPointerException.class, () -> new RuleBasedSizingCalculator(null));
+    }
+
+    @Test
+    void shouldClampQueueWhenMultiplicationWouldOverflow() {
+        RuleBasedSizingConfig overflowProneConfig = new RuleBasedSizingConfig(
+                2,
+                100_000,
+                100_000.0,
+                1.0,
+                Integer.MAX_VALUE,
+                100,
+                1_000_000,
+                1
+        );
+        RuleBasedSizingCalculator overflowCalculator = new RuleBasedSizingCalculator(overflowProneConfig);
+        SizingInput input = new SizingInput(
+                16L * 1024 * 1024 * 1024,
+                1,
+                1,
+                128
+        );
+
+        SizingPlan plan = overflowCalculator.calculate(input);
+
+        assertEquals(100_000, plan.corePoolSize());
+        assertEquals(1_000_000, plan.queueCapacity());
+    }
+}

@@ -1,22 +1,28 @@
 package com.zhiwu.project2026.threadpool.schemeb;
 
+import com.zhiwu.project2026.threadpool.gating.ScaleUpGateState;
+
 import java.time.Instant;
 
 public class FeedbackControlState {
 
-    private int consecutiveQueueWaitBreaches;
+    private final ScaleUpGateState scaleUpGateState = new ScaleUpGateState();
     private Instant lastAdjustmentAt;
 
     public int getConsecutiveQueueWaitBreaches() {
-        return consecutiveQueueWaitBreaches;
+        return scaleUpGateState.getConsecutiveQueueWaitBreaches();
     }
 
     public void incrementQueueWaitBreaches() {
-        consecutiveQueueWaitBreaches++;
+        scaleUpGateState.incrementQueueWaitBreaches();
     }
 
     public void resetQueueWaitBreaches() {
-        consecutiveQueueWaitBreaches = 0;
+        scaleUpGateState.resetQueueWaitBreaches();
+    }
+
+    public ScaleUpGateState getScaleUpGateState() {
+        return scaleUpGateState;
     }
 
     public Instant getLastAdjustmentAt() {
