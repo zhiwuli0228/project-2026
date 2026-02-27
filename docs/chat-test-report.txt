@@ -1,0 +1,2084 @@
+Chat 'ChatTitle(text="结合单元测试和设计文档中的方案B的原设…" with Codex, isCustom=true)' (a2615f02-0fcd-4812-bc69-ad879416efec)
+Context:
+
+Messages: 24
+==============================================================================================================
+
+==== UserMessageImpl #1 ====
+User: 
+结合单元测试和设计文档中的方案B的原设计，继续优化完善这个方案的代码实现
+Attachments:
+Attachment Name: FeedbackSizingController.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+import java.time.Instant;
+import java.util.Objects;
+
+public class FeedbackSizingController {
+
+    private final FeedbackControllerConfig config;
+
+    public FeedbackSizingController(FeedbackControllerConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+    }
+
+    public FeedbackSizingDecision decide(
+            int currentCorePoolSize,
+            FeedbackMetrics metrics,
+            FeedbackControlState state,
+            Instant now
+    ) {
+        if (currentCorePoolSize <= 0) {
+            throw new IllegalArgumentException("currentCorePoolSize must be positive");
+        }
+        Objects.requireNonNull(metrics, "metrics");
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(now, "now");
+
+        if (metrics.queueWaitP95Ms() > config.targetQueueWaitP95Ms()) {
+            state.incrementQueueWaitBreaches();
+        } else {
+            state.resetQueueWaitBreaches();
+        }
+
+        int clampedCurrentCore = clamp(config.minCore(), currentCorePoolSize, config.maxCore());
+        int step = Math.max(1, (int) Math.floor(clampedCurrentCore * config.maxStepRatio()));
+
+        if (!cooldownPassed(state, now)) {
+            int currentQueue = queueByCore(clampedCurrentCore);
+            return new FeedbackSizingDecision(
+                    clampedCurrentCore,
+                    currentQueue,
+                    ScalingAction.HOLD_COOLDOWN,
+                    "cooldown not passed"
+            );
+        }
+
+        if (metrics.heapUsedRatio() > config.heapGuardHigh()
+                || metrics.gcPauseP95Ms() > config.gcPauseP95MsThreshold()) {
+            int targetCore = clamp(config.minCore(), clampedCurrentCore - step, config.maxCore());
+            state.setLastAdjustmentAt(now);
+            state.resetQueueWaitBreaches();
+            return new FeedbackSizingDecision(
+                    targetCore,
+                    queueByCore(targetCore),
+                    ScalingAction.SCALE_DOWN,
+                    "heap or gc pressure high"
+            );
+        }
+
+        boolean shouldScaleUp = state.getConsecutiveQueueWaitBreaches() >= config.consecutiveQueueBreachThreshold()
+                && metrics.activeRatio() >= config.busyThreadRatioThreshold()
+                && metrics.heapUsedRatio() < config.heapGuardLow();
+        if (shouldScaleUp) {
+            int targetCore = clamp(config.minCore(), clampedCurrentCore + step, config.maxCore());
+            state.setLastAdjustmentAt(now);
+            state.resetQueueWaitBreaches();
+            return new FeedbackSizingDecision(
+                    targetCore,
+                    queueByCore(targetCore),
+                    ScalingAction.SCALE_UP,
+                    "queue wait breach persisted"
+            );
+        }
+
+        return new FeedbackSizingDecision(
+                clampedCurrentCore,
+                queueByCore(clampedCurrentCore),
+                ScalingAction.HOLD_STABLE,
+                "no scaling condition met"
+        );
+    }
+
+    private boolean cooldownPassed(FeedbackControlState state, Instant now) {
+        Instant lastAdjustmentAt = state.getLastAdjustmentAt();
+        return lastAdjustmentAt == null
+                || !lastAdjustmentAt.plus(config.cooldown()).isAfter(now);
+    }
+
+    private int queueByCore(int corePoolSize) {
+        int linked = corePoolSize * config.queuePerThread();
+        return clamp(config.minQueue(), linked, config.maxQueue());
+    }
+
+    private int clamp(int min, int value, int max) {
+        return Math.min(max, Math.max(min, value));
+    }
+}
+
+```
+Attachment Name: AppliedFeedbackResult.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+public record AppliedFeedbackResult(
+        FeedbackSizingDecision decision,
+        int appliedQueueCapacity,
+        boolean queueShrinkDeferred
+) {
+}
+
+```
+Attachment Name: FeedbackControllerConfig.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+import java.time.Duration;
+
+public record FeedbackControllerConfig(
+        int minCore,
+        int maxCore,
+        int minQueue,
+        int maxQueue,
+        int queuePerThread,
+        long targetQueueWaitP95Ms,
+        double busyThreadRatioThreshold,
+        int consecutiveQueueBreachThreshold,
+        double heapGuardLow,
+        double heapGuardHigh,
+        long gcPauseP95MsThreshold,
+        double maxStepRatio,
+        Duration cooldown
+) {
+
+    public FeedbackControllerConfig {
+        if (minCore <= 0 || maxCore <= 0 || minCore > maxCore) {
+            throw new IllegalArgumentException("invalid core bounds");
+        }
+        if (minQueue <= 0 || maxQueue <= 0 || minQueue > maxQueue) {
+            throw new IllegalArgumentException("invalid queue bounds");
+        }
+        if (queuePerThread <= 0) {
+            throw new IllegalArgumentException("queuePerThread must be positive");
+        }
+        if (targetQueueWaitP95Ms <= 0 || gcPauseP95MsThreshold <= 0) {
+            throw new IllegalArgumentException("latency thresholds must be positive");
+        }
+        if (busyThreadRatioThreshold <= 0 || busyThreadRatioThreshold > 1) {
+            throw new IllegalArgumentException("busyThreadRatioThreshold must be in (0, 1]");
+        }
+        if (consecutiveQueueBreachThreshold <= 0) {
+            throw new IllegalArgumentException("consecutiveQueueBreachThreshold must be positive");
+        }
+        if (heapGuardLow <= 0 || heapGuardLow >= 1 || heapGuardHigh <= 0 || heapGuardHigh >= 1) {
+            throw new IllegalArgumentException("heap guards must be in (0, 1)");
+        }
+        if (heapGuardLow >= heapGuardHigh) {
+            throw new IllegalArgumentException("heapGuardLow must be lower than heapGuardHigh");
+        }
+        if (maxStepRatio <= 0 || maxStepRatio > 1) {
+            throw new IllegalArgumentException("maxStepRatio must be in (0, 1]");
+        }
+        if (cooldown == null || cooldown.isNegative() || cooldown.isZero()) {
+            throw new IllegalArgumentException("cooldown must be positive");
+        }
+    }
+}
+
+```
+Attachment Name: ScalingAction.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+public enum ScalingAction {
+    SCALE_UP,
+    SCALE_DOWN,
+    HOLD_COOLDOWN,
+    HOLD_STABLE
+}
+
+```
+Attachment Name: dynamic-threadpool-autoscaling-design.md
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+````markdown
+# 线程池容量动态调整设计文档
+
+## 1. 背景与目标
+
+当前服务存在以下现实约束：
+- 服务会发生水平扩容/缩容（Pod 或实例数量变化）。
+- 单实例 JVM `-Xmx` 在不同环境下不一致，甚至会动态变更（重启后生效）。
+- 固定线程池参数（`corePoolSize`、队列容量）在不同实例规格下容易过大或过小。
+
+目标：
+- 让线程池核心线程数与队列容量可依据“实例可用内存 + 集群副本规模 + 实时负载”动态调整。
+- 保证吞吐与延迟平衡，避免 OOM、过度排队与频繁抖动。
+- 方案可灰度、可回滚、可观测。
+
+非目标：
+- 不追求完全自适应到“零人工参数”；仍保留边界与兜底阈值。
+
+## 2. 设计原则
+
+- 安全优先：任何时刻都不突破内存安全水位。
+- 平滑调整：避免每秒级频繁调参导致抖动。
+- 分层决策：先算“静态上限”（基于 `Xmx`/副本数），再做“动态微调”（基于实时指标）。
+- 可解释性：参数来源可追溯，便于排障与审计。
+
+## 3. 关键输入与指标
+
+### 3.1 静态输入（重启后变化）
+- `XmxBytes`：JVM 最大堆。
+- `replicaCount`：当前服务副本数。
+- `taskAvgHeapBytes`：单任务平均堆占用（压测/线上采样得到）。
+- `taskP95HeapBytes`：单任务 P95 堆占用。
+
+### 3.2 动态输入（运行时变化）
+- `queueWaitP95Ms`：队列等待 P95。
+- `execTimeP95Ms`：任务执行 P95。
+- `activeCount/corePoolSize`：线程繁忙度。
+- `rejectionRate`：拒绝率。
+- `heapUsedRatio`：堆使用率。
+- `gcPauseP95Ms`：GC 暂停 P95。
+
+## 4. 可行方案
+
+## 方案 A：规则驱动（Xmx + 副本数）离散分档
+
+### 思路
+按 `Xmx` 和 `replicaCount` 映射到预定义档位，定时（如 30s）校准线程池参数。
+
+### 示例规则
+- 基础线程数：`baseCore = clamp(2, cpu*2, 64)`
+- 内存约束线程上限：`memBoundCore = floor((XmxBytes * 0.25) / taskP95HeapBytes)`
+- 副本约束：`replicaFactor = sqrt(referenceReplica / replicaCount)`
+- 最终核心线程：`core = clamp(minCore, floor(min(baseCore, memBoundCore) * replicaFactor), maxCore)`
+- 队列容量：`queue = clamp(minQueue, core * queuePerThread, maxQueue)`
+
+### 优点
+- 实现快，变更风险小。
+- 参数可解释，适合先上线。
+
+### 缺点
+- 仅规则，无法及时响应瞬时流量尖峰。
+- 规则维护成本随业务复杂度上升。
+
+适用场景：初期落地、对稳定性要求高、历史数据不足。
+
+---
+
+## 方案 B：反馈闭环（基于 SLO 的控制器）
+
+### 思路
+使用控制器（P/PI/PID 的简化实现）围绕目标 SLO（如 `queueWaitP95Ms <= 100ms`）动态调节 `corePoolSize` 与 `queueCapacity`。
+
+### 控制逻辑（简化）
+- 若 `queueWaitP95Ms` 连续 N 个周期超阈值，且 `heapUsedRatio < 0.75`，增加 `core`。
+- 若 `heapUsedRatio > 0.82` 或 `gcPauseP95Ms` 超阈值，降低 `core` 并收缩队列。
+- 每次调整步长受限（如 `±10%`），并设置冷却时间（如 2~5 分钟）。
+
+### 优点
+- 能自动适应流量波动，SLO 对齐更好。
+- 比纯静态规则更节省资源。
+
+### 缺点
+- 调参复杂，需防止振荡。
+- 对监控质量要求高。
+
+适用场景：有稳定监控体系、可持续调优团队。
+
+---
+
+## 方案 C：两层混合（推荐）
+
+### 思路
+- 第一层“容量预算层”：基于 `Xmx` + `replicaCount` 算安全上限/下限。
+- 第二层“运行控制层”：在预算区间内根据实时指标微调。
+
+### 运行机制
+1. 预算层给出：`coreMin/coreMax/queueMin/queueMax`。
+2. 控制层每 30s 评估指标，只能在预算区间调整。
+3. 当 `Xmx` 或副本数变化时，重算预算并触发平滑迁移。
+
+### 优点
+- 兼顾安全性与自适应能力。
+- 比纯反馈更易控，比纯规则更智能。
+
+### 缺点
+- 架构较复杂，需要更多工程实现。
+
+适用场景：中长期生产方案。
+
+---
+
+## 方案 D：离线建模 + 在线推断
+
+### 思路
+利用历史数据训练回归模型（输入：流量、任务特征、`Xmx`、副本数；输出：线程/队列推荐值），在线周期性推断。
+
+### 优点
+- 对复杂非线性场景可能最优。
+
+### 缺点
+- 建模、特征、漂移治理成本高。
+- 可解释性与稳定性治理难度大。
+
+适用场景：高成熟度平台团队，不建议作为第一阶段。
+
+## 5. 方案对比
+
+| 维度 | 方案 A 规则驱动 | 方案 B 反馈闭环 | 方案 C 两层混合 | 方案 D 建模推断 |
+|---|---|---|---|---|
+| 实现复杂度 | 低 | 中 | 中高 | 高 |
+| 稳定性 | 高 | 中（依赖调参） | 高 | 中 |
+| 自适应能力 | 低~中 | 高 | 高 | 高 |
+| 可解释性 | 高 | 中 | 高 | 低~中 |
+| 上线风险 | 低 | 中 | 中 | 高 |
+| 推荐级别 | 短期可用 | 可选 | 强烈推荐 | 后期探索 |
+
+## 6. 推荐方案（C）详细设计
+
+### 6.1 参数模型
+
+预算层：
+- `coreUpperByMem = floor((XmxBytes * memBudgetRatio) / taskP95HeapBytes)`
+- `coreUpperByCpu = cpuCore * cpuThreadFactor`
+- `coreMax = clamp(minCore, min(coreUpperByMem, coreUpperByCpu), hardMaxCore)`
+- `coreMin = max(hardMinCore, floor(coreMax * minCoreRatio))`
+
+副本修正：
+- `scaleFactor = (referenceReplica / replicaCount)^alpha`，`alpha` 建议 `0.3~0.5`。
+- `coreMin/coreMax` 同步乘以 `scaleFactor` 后再 clamp。
+
+队列预算：
+- `queueMaxByMem = floor((XmxBytes * queueMemBudgetRatio) / taskAvgHeapBytes)`
+- `queueMax = min(queueMaxByMem, coreMax * queuePerThreadUpper)`
+- `queueMin = max(hardMinQueue, coreMin * queuePerThreadLower)`
+
+控制层（每 30s）：
+- 目标：`queueWaitP95Ms <= targetQueueWaitMs`
+- 若超标且 `activeRatio > 0.85` 且 `heapUsedRatio < heapGuardLow`，`core += stepUp`
+- 若 `heapUsedRatio > heapGuardHigh` 或 `gcPauseP95Ms` 超标，`core -= stepDown`
+- 队列与 `core` 联动，保持 `queue/core` 在阈值区间。
+
+### 6.2 防抖与保护
+- 冷却窗口：单次调整后 120s 内不再调整。
+- 步长限制：每次最多调整 `max(1, floor(core*0.1))`。
+- 熔断：出现连续 M 次 OOM 预警或高 GC，强制切换到保守配置。
+- 回退：支持动态开关，秒级回退到静态配置。
+
+### 6.3 配置示例（application.yml）
+
+```yaml
+threadpool:
+  adaptive:
+    enabled: true
+    mode: HYBRID
+    evaluate-interval: 30s
+    cooldown: 120s
+
+    hard:
+      min-core: 2
+      max-core: 64
+      min-queue: 100
+      max-queue: 20000
+
+    budget:
+      mem-budget-ratio: 0.25
+      queue-mem-budget-ratio: 0.12
+      cpu-thread-factor: 2.0
+      min-core-ratio: 0.35
+      queue-per-thread-lower: 20
+      queue-per-thread-upper: 400
+
+    scaling:
+      reference-replica: 4
+      alpha: 0.4
+
+    guard:
+      heap-guard-low: 0.75
+      heap-guard-high: 0.82
+      target-queue-wait-ms: 100
+      gc-pause-p95-ms: 200
+```
+
+### 6.4 实现建议（Spring）
+- 封装 `AdaptiveThreadPoolManager`：负责采集指标、计算目标值、执行调整。
+- 使用可动态变更队列容量的实现（如自定义 `ResizableCapacityLinkedBlockingQueue`）。
+- 线程池调整通过 `ThreadPoolExecutor#setCorePoolSize/setMaximumPoolSize`。
+- 指标接入 Micrometer + Prometheus，关键告警接入 Alertmanager。
+
+### 6.5 伪代码
+
+```java
+void reconcile() {
+    Metrics m = metricsCollector.snapshot();
+    Budget b = budgetCalculator.recalculateIfNeeded(xmx(), replicaCount());
+
+    int currentCore = executor.getCorePoolSize();
+    int targetCore = currentCore;
+
+    if (m.heapUsedRatio > cfg.heapGuardHigh || m.gcPauseP95Ms > cfg.gcPauseThreshold) {
+        targetCore = currentCore - stepDown(currentCore);
+    } else if (m.queueWaitP95Ms > cfg.targetQueueWaitMs
+            && m.activeRatio > 0.85
+            && m.heapUsedRatio < cfg.heapGuardLow) {
+        targetCore = currentCore + stepUp(currentCore);
+    }
+
+    targetCore = clamp(b.coreMin, targetCore, b.coreMax);
+    int targetQueue = clamp(b.queueMin, queueByCore(targetCore), b.queueMax);
+
+    if (cooldownPassed() && changedEnough(targetCore, targetQueue)) {
+        apply(targetCore, targetQueue);
+    }
+}
+```
+
+## 7. 落地路线图
+
+1. Phase 1（1~2 周）：上线方案 A（规则驱动），打通指标与动态配置开关。
+2. Phase 2（2~4 周）：引入方案 C 的控制层，但默认只读（不执行），先观测推荐值。
+3. Phase 3（1~2 周）：灰度开启自动调整（10% -> 30% -> 100%）。
+4. Phase 4（持续）：基于线上数据微调参数，评估是否需要方案 D。
+
+## 8. 风险与应对
+
+- 风险：控制振荡导致延迟抖动。
+  - 应对：冷却窗口 + 步长限制 + 双阈值迟滞（hysteresis）。
+
+- 风险：任务内存估计不准引起 OOM。
+  - 应对：使用 P95/P99 估计；保留 20% 安全余量；高水位强制降配。
+
+- 风险：副本数感知延迟。
+  - 应对：使用 K8s API + 本地缓存 + 超时回退默认值。
+
+- 风险：队列动态缩容行为不安全。
+  - 应对：只允许扩容实时生效，缩容通过“新建池平滑切换”完成。
+
+## 9. 验收标准
+
+- 在同等流量下，`queueWaitP95Ms` 相比静态配置下降 >= 20%。
+- 无新增 OOM，`heapUsedRatio > 0.9` 的持续时长下降 >= 30%。
+- 拒绝率在目标区间内（如 < 0.1%）。
+- 扩缩容后 5 分钟内恢复到目标 SLO。
+
+## 10. 结论
+
+- 短期可先落地方案 A，快速获得安全收益。
+- 中长期建议采用方案 C（两层混合）作为生产标准方案：
+  - 预算层确保不会越过内存与副本约束；
+  - 控制层保证在波动流量下持续贴近延迟目标。
+
+````
+Attachment Name: FeedbackMetrics.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+public record FeedbackMetrics(
+        long queueWaitP95Ms,
+        long execTimeP95Ms,
+        double activeRatio,
+        double rejectionRate,
+        double heapUsedRatio,
+        long gcPauseP95Ms
+) {
+
+    public FeedbackMetrics {
+        if (queueWaitP95Ms < 0 || execTimeP95Ms < 0 || gcPauseP95Ms < 0) {
+            throw new IllegalArgumentException("latency values must be non-negative");
+        }
+        if (activeRatio < 0 || activeRatio > 1) {
+            throw new IllegalArgumentException("activeRatio must be in [0, 1]");
+        }
+        if (rejectionRate < 0 || rejectionRate > 1) {
+            throw new IllegalArgumentException("rejectionRate must be in [0, 1]");
+        }
+        if (heapUsedRatio < 0 || heapUsedRatio > 1) {
+            throw new IllegalArgumentException("heapUsedRatio must be in [0, 1]");
+        }
+    }
+}
+
+```
+Attachment Name: FeedbackSizingDecision.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+public record FeedbackSizingDecision(
+        int targetCorePoolSize,
+        int targetQueueCapacity,
+        ScalingAction action,
+        String reason
+) {
+}
+
+```
+Attachment Name: FeedbackControlState.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+import java.time.Instant;
+
+public class FeedbackControlState {
+
+    private int consecutiveQueueWaitBreaches;
+    private Instant lastAdjustmentAt;
+
+    public int getConsecutiveQueueWaitBreaches() {
+        return consecutiveQueueWaitBreaches;
+    }
+
+    public void incrementQueueWaitBreaches() {
+        consecutiveQueueWaitBreaches++;
+    }
+
+    public void resetQueueWaitBreaches() {
+        consecutiveQueueWaitBreaches = 0;
+    }
+
+    public Instant getLastAdjustmentAt() {
+        return lastAdjustmentAt;
+    }
+
+    public void setLastAdjustmentAt(Instant lastAdjustmentAt) {
+        this.lastAdjustmentAt = lastAdjustmentAt;
+    }
+}
+
+```
+Attachment Name: FeedbackBasedThreadPoolManager.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemeb;
+
+import com.zhiwu.project2026.threadpool.schemea.ResizableCapacityBlockingQueue;
+
+import java.time.Instant;
+import java.util.Objects;
+import java.util.concurrent.ThreadPoolExecutor;
+
+public class FeedbackBasedThreadPoolManager {
+
+    private final FeedbackSizingController controller;
+
+    public FeedbackBasedThreadPoolManager(FeedbackSizingController controller) {
+        this.controller = Objects.requireNonNull(controller, "controller");
+    }
+
+    public AppliedFeedbackResult reconcile(
+            ThreadPoolExecutor executor,
+            ResizableCapacityBlockingQueue<Runnable> queue,
+            FeedbackMetrics metrics,
+            FeedbackControlState state,
+            Instant now
+    ) {
+        Objects.requireNonNull(executor, "executor");
+        Objects.requireNonNull(queue, "queue");
+
+        int currentCore = executor.getCorePoolSize();
+        FeedbackSizingDecision decision = controller.decide(currentCore, metrics, state, now);
+        applyCoreAsFixedPool(executor, decision.targetCorePoolSize());
+
+        int currentQueueSize = queue.size();
+        int appliedQueueCapacity = Math.max(decision.targetQueueCapacity(), currentQueueSize);
+        boolean queueShrinkDeferred = appliedQueueCapacity != decision.targetQueueCapacity();
+        queue.setCapacity(appliedQueueCapacity);
+
+        return new AppliedFeedbackResult(decision, appliedQueueCapacity, queueShrinkDeferred);
+    }
+
+    private void applyCoreAsFixedPool(ThreadPoolExecutor executor, int targetCore) {
+        if (targetCore > executor.getMaximumPoolSize()) {
+            executor.setMaximumPoolSize(targetCore);
+            executor.setCorePoolSize(targetCore);
+            return;
+        }
+        executor.setCorePoolSize(targetCore);
+        executor.setMaximumPoolSize(targetCore);
+    }
+}
+
+```
+
+
+kotlin.Unit
+
+==== AgentMessage #2 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #3 ====
+User: 
+结合代码和之前你输出的单元测试以及设计文档，对于方案C的实现进一步优化，保证所有测试全部通过，并且对于边界场景需要重点考虑
+Attachments:
+Attachment Name: HybridControlState.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+import java.time.Instant;
+
+public class HybridControlState {
+
+    private int consecutiveQueueWaitBreaches;
+    private Instant lastAdjustmentAt;
+
+    public int getConsecutiveQueueWaitBreaches() {
+        return consecutiveQueueWaitBreaches;
+    }
+
+    public void incrementQueueWaitBreaches() {
+        consecutiveQueueWaitBreaches++;
+    }
+
+    public void resetQueueWaitBreaches() {
+        consecutiveQueueWaitBreaches = 0;
+    }
+
+    public Instant getLastAdjustmentAt() {
+        return lastAdjustmentAt;
+    }
+
+    public void setLastAdjustmentAt(Instant lastAdjustmentAt) {
+        this.lastAdjustmentAt = lastAdjustmentAt;
+    }
+}
+
+```
+Attachment Name: HybridSizingConfig.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+import java.time.Duration;
+
+public record HybridSizingConfig(
+        int hardMinCore,
+        int hardMaxCore,
+        int hardMinQueue,
+        int hardMaxQueue,
+        double memBudgetRatio,
+        double queueMemBudgetRatio,
+        double cpuThreadFactor,
+        double minCoreRatio,
+        int queuePerThreadLower,
+        int queuePerThreadUpper,
+        int referenceReplica,
+        double alpha,
+        long targetQueueWaitP95Ms,
+        double busyThreadRatioThreshold,
+        int consecutiveQueueBreachThreshold,
+        double heapGuardLow,
+        double heapGuardHigh,
+        long gcPauseP95MsThreshold,
+        double maxStepRatio,
+        Duration cooldown
+) {
+
+    public HybridSizingConfig {
+        if (hardMinCore <= 0 || hardMaxCore <= 0 || hardMinCore > hardMaxCore) {
+            throw new IllegalArgumentException("invalid core hard bounds");
+        }
+        if (hardMinQueue <= 0 || hardMaxQueue <= 0 || hardMinQueue > hardMaxQueue) {
+            throw new IllegalArgumentException("invalid queue hard bounds");
+        }
+        if (memBudgetRatio <= 0 || queueMemBudgetRatio <= 0 || cpuThreadFactor <= 0 || minCoreRatio <= 0 || minCoreRatio > 1) {
+            throw new IllegalArgumentException("invalid budget ratios");
+        }
+        if (queuePerThreadLower <= 0 || queuePerThreadUpper <= 0 || queuePerThreadLower > queuePerThreadUpper) {
+            throw new IllegalArgumentException("invalid queue per thread bounds");
+        }
+        if (referenceReplica <= 0 || alpha <= 0) {
+            throw new IllegalArgumentException("referenceReplica and alpha must be positive");
+        }
+        if (targetQueueWaitP95Ms <= 0 || gcPauseP95MsThreshold <= 0) {
+            throw new IllegalArgumentException("latency thresholds must be positive");
+        }
+        if (busyThreadRatioThreshold <= 0 || busyThreadRatioThreshold > 1) {
+            throw new IllegalArgumentException("busyThreadRatioThreshold must be in (0, 1]");
+        }
+        if (consecutiveQueueBreachThreshold <= 0) {
+            throw new IllegalArgumentException("consecutiveQueueBreachThreshold must be positive");
+        }
+        if (heapGuardLow <= 0 || heapGuardLow >= 1 || heapGuardHigh <= 0 || heapGuardHigh >= 1 || heapGuardLow >= heapGuardHigh) {
+            throw new IllegalArgumentException("invalid heap guards");
+        }
+        if (maxStepRatio <= 0 || maxStepRatio > 1) {
+            throw new IllegalArgumentException("maxStepRatio must be in (0, 1]");
+        }
+        if (cooldown == null || cooldown.isNegative() || cooldown.isZero()) {
+            throw new IllegalArgumentException("cooldown must be positive");
+        }
+    }
+}
+
+```
+Attachment Name: HybridSizingController.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+import java.time.Instant;
+import java.util.Objects;
+
+public class HybridSizingController {
+
+    private final HybridSizingConfig config;
+
+    public HybridSizingController(HybridSizingConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+    }
+
+    public HybridSizingDecision decide(
+            int currentCorePoolSize,
+            HybridBudgetPlan budget,
+            HybridMetrics metrics,
+            HybridControlState state,
+            Instant now
+    ) {
+        if (currentCorePoolSize <= 0) {
+            throw new IllegalArgumentException("currentCorePoolSize must be positive");
+        }
+        Objects.requireNonNull(budget, "budget");
+        Objects.requireNonNull(metrics, "metrics");
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(now, "now");
+
+        if (metrics.queueWaitP95Ms() > config.targetQueueWaitP95Ms()) {
+            state.incrementQueueWaitBreaches();
+        } else {
+            state.resetQueueWaitBreaches();
+        }
+
+        int clampedCurrentCore = clamp(budget.coreMin(), currentCorePoolSize, budget.coreMax());
+        int step = Math.max(1, (int) Math.floor(clampedCurrentCore * config.maxStepRatio()));
+
+        if (!cooldownPassed(state, now)) {
+            return new HybridSizingDecision(
+                    clampedCurrentCore,
+                    queueByCoreWithinBudget(clampedCurrentCore, budget),
+                    HybridScalingAction.HOLD_COOLDOWN,
+                    "cooldown not passed"
+            );
+        }
+
+        if (metrics.heapUsedRatio() > config.heapGuardHigh()
+                || metrics.gcPauseP95Ms() > config.gcPauseP95MsThreshold()) {
+            int targetCore = clamp(budget.coreMin(), clampedCurrentCore - step, budget.coreMax());
+            state.setLastAdjustmentAt(now);
+            state.resetQueueWaitBreaches();
+            return new HybridSizingDecision(
+                    targetCore,
+                    queueByCoreWithinBudget(targetCore, budget),
+                    HybridScalingAction.SCALE_DOWN,
+                    "heap or gc pressure high"
+            );
+        }
+
+        boolean shouldScaleUp = state.getConsecutiveQueueWaitBreaches() >= config.consecutiveQueueBreachThreshold()
+                && metrics.activeRatio() >= config.busyThreadRatioThreshold()
+                && metrics.heapUsedRatio() < config.heapGuardLow();
+        if (shouldScaleUp) {
+            int targetCore = clamp(budget.coreMin(), clampedCurrentCore + step, budget.coreMax());
+            state.setLastAdjustmentAt(now);
+            state.resetQueueWaitBreaches();
+            return new HybridSizingDecision(
+                    targetCore,
+                    queueByCoreWithinBudget(targetCore, budget),
+                    HybridScalingAction.SCALE_UP,
+                    "queue wait breach persisted"
+            );
+        }
+
+        return new HybridSizingDecision(
+                clampedCurrentCore,
+                queueByCoreWithinBudget(clampedCurrentCore, budget),
+                HybridScalingAction.HOLD_STABLE,
+                "no scaling condition met"
+        );
+    }
+
+    private boolean cooldownPassed(HybridControlState state, Instant now) {
+        Instant lastAdjustmentAt = state.getLastAdjustmentAt();
+        return lastAdjustmentAt == null || !lastAdjustmentAt.plus(config.cooldown()).isAfter(now);
+    }
+
+    private int queueByCoreWithinBudget(int corePoolSize, HybridBudgetPlan budget) {
+        int targetRatio = (config.queuePerThreadLower() + config.queuePerThreadUpper()) / 2;
+        int estimatedQueue = corePoolSize * targetRatio;
+        return clamp(budget.queueMin(), estimatedQueue, budget.queueMax());
+    }
+
+    private int clamp(int min, int value, int max) {
+        return Math.min(max, Math.max(min, value));
+    }
+}
+
+```
+Attachment Name: dynamic-threadpool-autoscaling-design.md
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+````markdown
+# 线程池容量动态调整设计文档
+
+## 1. 背景与目标
+
+当前服务存在以下现实约束：
+- 服务会发生水平扩容/缩容（Pod 或实例数量变化）。
+- 单实例 JVM `-Xmx` 在不同环境下不一致，甚至会动态变更（重启后生效）。
+- 固定线程池参数（`corePoolSize`、队列容量）在不同实例规格下容易过大或过小。
+
+目标：
+- 让线程池核心线程数与队列容量可依据“实例可用内存 + 集群副本规模 + 实时负载”动态调整。
+- 保证吞吐与延迟平衡，避免 OOM、过度排队与频繁抖动。
+- 方案可灰度、可回滚、可观测。
+
+非目标：
+- 不追求完全自适应到“零人工参数”；仍保留边界与兜底阈值。
+
+## 2. 设计原则
+
+- 安全优先：任何时刻都不突破内存安全水位。
+- 平滑调整：避免每秒级频繁调参导致抖动。
+- 分层决策：先算“静态上限”（基于 `Xmx`/副本数），再做“动态微调”（基于实时指标）。
+- 可解释性：参数来源可追溯，便于排障与审计。
+
+## 3. 关键输入与指标
+
+### 3.1 静态输入（重启后变化）
+- `XmxBytes`：JVM 最大堆。
+- `replicaCount`：当前服务副本数。
+- `taskAvgHeapBytes`：单任务平均堆占用（压测/线上采样得到）。
+- `taskP95HeapBytes`：单任务 P95 堆占用。
+
+### 3.2 动态输入（运行时变化）
+- `queueWaitP95Ms`：队列等待 P95。
+- `execTimeP95Ms`：任务执行 P95。
+- `activeCount/corePoolSize`：线程繁忙度。
+- `rejectionRate`：拒绝率。
+- `heapUsedRatio`：堆使用率。
+- `gcPauseP95Ms`：GC 暂停 P95。
+
+## 4. 可行方案
+
+## 方案 A：规则驱动（Xmx + 副本数）离散分档
+
+### 思路
+按 `Xmx` 和 `replicaCount` 映射到预定义档位，定时（如 30s）校准线程池参数。
+
+### 示例规则
+- 基础线程数：`baseCore = clamp(2, cpu*2, 64)`
+- 内存约束线程上限：`memBoundCore = floor((XmxBytes * 0.25) / taskP95HeapBytes)`
+- 副本约束：`replicaFactor = sqrt(referenceReplica / replicaCount)`
+- 最终核心线程：`core = clamp(minCore, floor(min(baseCore, memBoundCore) * replicaFactor), maxCore)`
+- 队列容量：`queue = clamp(minQueue, core * queuePerThread, maxQueue)`
+
+### 优点
+- 实现快，变更风险小。
+- 参数可解释，适合先上线。
+
+### 缺点
+- 仅规则，无法及时响应瞬时流量尖峰。
+- 规则维护成本随业务复杂度上升。
+
+适用场景：初期落地、对稳定性要求高、历史数据不足。
+
+---
+
+## 方案 B：反馈闭环（基于 SLO 的控制器）
+
+### 思路
+使用控制器（P/PI/PID 的简化实现）围绕目标 SLO（如 `queueWaitP95Ms <= 100ms`）动态调节 `corePoolSize` 与 `queueCapacity`。
+
+### 控制逻辑（简化）
+- 若 `queueWaitP95Ms` 连续 N 个周期超阈值，且 `heapUsedRatio < 0.75`，增加 `core`。
+- 若 `heapUsedRatio > 0.82` 或 `gcPauseP95Ms` 超阈值，降低 `core` 并收缩队列。
+- 每次调整步长受限（如 `±10%`），并设置冷却时间（如 2~5 分钟）。
+
+### 优点
+- 能自动适应流量波动，SLO 对齐更好。
+- 比纯静态规则更节省资源。
+
+### 缺点
+- 调参复杂，需防止振荡。
+- 对监控质量要求高。
+
+适用场景：有稳定监控体系、可持续调优团队。
+
+---
+
+## 方案 C：两层混合（推荐）
+
+### 思路
+- 第一层“容量预算层”：基于 `Xmx` + `replicaCount` 算安全上限/下限。
+- 第二层“运行控制层”：在预算区间内根据实时指标微调。
+
+### 运行机制
+1. 预算层给出：`coreMin/coreMax/queueMin/queueMax`。
+2. 控制层每 30s 评估指标，只能在预算区间调整。
+3. 当 `Xmx` 或副本数变化时，重算预算并触发平滑迁移。
+
+### 优点
+- 兼顾安全性与自适应能力。
+- 比纯反馈更易控，比纯规则更智能。
+
+### 缺点
+- 架构较复杂，需要更多工程实现。
+
+适用场景：中长期生产方案。
+
+---
+
+## 方案 D：离线建模 + 在线推断
+
+### 思路
+利用历史数据训练回归模型（输入：流量、任务特征、`Xmx`、副本数；输出：线程/队列推荐值），在线周期性推断。
+
+### 优点
+- 对复杂非线性场景可能最优。
+
+### 缺点
+- 建模、特征、漂移治理成本高。
+- 可解释性与稳定性治理难度大。
+
+适用场景：高成熟度平台团队，不建议作为第一阶段。
+
+## 5. 方案对比
+
+| 维度 | 方案 A 规则驱动 | 方案 B 反馈闭环 | 方案 C 两层混合 | 方案 D 建模推断 |
+|---|---|---|---|---|
+| 实现复杂度 | 低 | 中 | 中高 | 高 |
+| 稳定性 | 高 | 中（依赖调参） | 高 | 中 |
+| 自适应能力 | 低~中 | 高 | 高 | 高 |
+| 可解释性 | 高 | 中 | 高 | 低~中 |
+| 上线风险 | 低 | 中 | 中 | 高 |
+| 推荐级别 | 短期可用 | 可选 | 强烈推荐 | 后期探索 |
+
+## 6. 推荐方案（C）详细设计
+
+### 6.1 参数模型
+
+预算层：
+- `coreUpperByMem = floor((XmxBytes * memBudgetRatio) / taskP95HeapBytes)`
+- `coreUpperByCpu = cpuCore * cpuThreadFactor`
+- `coreMax = clamp(minCore, min(coreUpperByMem, coreUpperByCpu), hardMaxCore)`
+- `coreMin = max(hardMinCore, floor(coreMax * minCoreRatio))`
+
+副本修正：
+- `scaleFactor = (referenceReplica / replicaCount)^alpha`，`alpha` 建议 `0.3~0.5`。
+- `coreMin/coreMax` 同步乘以 `scaleFactor` 后再 clamp。
+
+队列预算：
+- `queueMaxByMem = floor((XmxBytes * queueMemBudgetRatio) / taskAvgHeapBytes)`
+- `queueMax = min(queueMaxByMem, coreMax * queuePerThreadUpper)`
+- `queueMin = max(hardMinQueue, coreMin * queuePerThreadLower)`
+
+控制层（每 30s）：
+- 目标：`queueWaitP95Ms <= targetQueueWaitMs`
+- 若超标且 `activeRatio > 0.85` 且 `heapUsedRatio < heapGuardLow`，`core += stepUp`
+- 若 `heapUsedRatio > heapGuardHigh` 或 `gcPauseP95Ms` 超标，`core -= stepDown`
+- 队列与 `core` 联动，保持 `queue/core` 在阈值区间。
+
+### 6.2 防抖与保护
+- 冷却窗口：单次调整后 120s 内不再调整。
+- 步长限制：每次最多调整 `max(1, floor(core*0.1))`。
+- 熔断：出现连续 M 次 OOM 预警或高 GC，强制切换到保守配置。
+- 回退：支持动态开关，秒级回退到静态配置。
+
+### 6.3 配置示例（application.yml）
+
+```yaml
+threadpool:
+  adaptive:
+    enabled: true
+    mode: HYBRID
+    evaluate-interval: 30s
+    cooldown: 120s
+
+    hard:
+      min-core: 2
+      max-core: 64
+      min-queue: 100
+      max-queue: 20000
+
+    budget:
+      mem-budget-ratio: 0.25
+      queue-mem-budget-ratio: 0.12
+      cpu-thread-factor: 2.0
+      min-core-ratio: 0.35
+      queue-per-thread-lower: 20
+      queue-per-thread-upper: 400
+
+    scaling:
+      reference-replica: 4
+      alpha: 0.4
+
+    guard:
+      heap-guard-low: 0.75
+      heap-guard-high: 0.82
+      target-queue-wait-ms: 100
+      gc-pause-p95-ms: 200
+```
+
+### 6.4 实现建议（Spring）
+- 封装 `AdaptiveThreadPoolManager`：负责采集指标、计算目标值、执行调整。
+- 使用可动态变更队列容量的实现（如自定义 `ResizableCapacityLinkedBlockingQueue`）。
+- 线程池调整通过 `ThreadPoolExecutor#setCorePoolSize/setMaximumPoolSize`。
+- 指标接入 Micrometer + Prometheus，关键告警接入 Alertmanager。
+
+### 6.5 伪代码
+
+```java
+void reconcile() {
+    Metrics m = metricsCollector.snapshot();
+    Budget b = budgetCalculator.recalculateIfNeeded(xmx(), replicaCount());
+
+    int currentCore = executor.getCorePoolSize();
+    int targetCore = currentCore;
+
+    if (m.heapUsedRatio > cfg.heapGuardHigh || m.gcPauseP95Ms > cfg.gcPauseThreshold) {
+        targetCore = currentCore - stepDown(currentCore);
+    } else if (m.queueWaitP95Ms > cfg.targetQueueWaitMs
+            && m.activeRatio > 0.85
+            && m.heapUsedRatio < cfg.heapGuardLow) {
+        targetCore = currentCore + stepUp(currentCore);
+    }
+
+    targetCore = clamp(b.coreMin, targetCore, b.coreMax);
+    int targetQueue = clamp(b.queueMin, queueByCore(targetCore), b.queueMax);
+
+    if (cooldownPassed() && changedEnough(targetCore, targetQueue)) {
+        apply(targetCore, targetQueue);
+    }
+}
+```
+
+## 7. 落地路线图
+
+1. Phase 1（1~2 周）：上线方案 A（规则驱动），打通指标与动态配置开关。
+2. Phase 2（2~4 周）：引入方案 C 的控制层，但默认只读（不执行），先观测推荐值。
+3. Phase 3（1~2 周）：灰度开启自动调整（10% -> 30% -> 100%）。
+4. Phase 4（持续）：基于线上数据微调参数，评估是否需要方案 D。
+
+## 8. 风险与应对
+
+- 风险：控制振荡导致延迟抖动。
+  - 应对：冷却窗口 + 步长限制 + 双阈值迟滞（hysteresis）。
+
+- 风险：任务内存估计不准引起 OOM。
+  - 应对：使用 P95/P99 估计；保留 20% 安全余量；高水位强制降配。
+
+- 风险：副本数感知延迟。
+  - 应对：使用 K8s API + 本地缓存 + 超时回退默认值。
+
+- 风险：队列动态缩容行为不安全。
+  - 应对：只允许扩容实时生效，缩容通过“新建池平滑切换”完成。
+
+## 9. 验收标准
+
+- 在同等流量下，`queueWaitP95Ms` 相比静态配置下降 >= 20%。
+- 无新增 OOM，`heapUsedRatio > 0.9` 的持续时长下降 >= 30%。
+- 拒绝率在目标区间内（如 < 0.1%）。
+- 扩缩容后 5 分钟内恢复到目标 SLO。
+
+## 10. 结论
+
+- 短期可先落地方案 A，快速获得安全收益。
+- 中长期建议采用方案 C（两层混合）作为生产标准方案：
+  - 预算层确保不会越过内存与副本约束；
+  - 控制层保证在波动流量下持续贴近延迟目标。
+
+````
+Attachment Name: HybridScalingAction.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+public enum HybridScalingAction {
+    SCALE_UP,
+    SCALE_DOWN,
+    HOLD_COOLDOWN,
+    HOLD_STABLE
+}
+
+```
+Attachment Name: HybridThreadPoolManager.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+import com.zhiwu.project2026.threadpool.schemea.ResizableCapacityBlockingQueue;
+
+import java.time.Instant;
+import java.util.Objects;
+import java.util.concurrent.ThreadPoolExecutor;
+
+public class HybridThreadPoolManager {
+
+    private final HybridBudgetCalculator budgetCalculator;
+    private final HybridSizingController sizingController;
+
+    public HybridThreadPoolManager(HybridBudgetCalculator budgetCalculator, HybridSizingController sizingController) {
+        this.budgetCalculator = Objects.requireNonNull(budgetCalculator, "budgetCalculator");
+        this.sizingController = Objects.requireNonNull(sizingController, "sizingController");
+    }
+
+    public AppliedHybridResult reconcile(
+            ThreadPoolExecutor executor,
+            ResizableCapacityBlockingQueue<Runnable> queue,
+            HybridBudgetInput budgetInput,
+            HybridMetrics metrics,
+            HybridControlState state,
+            Instant now
+    ) {
+        Objects.requireNonNull(executor, "executor");
+        Objects.requireNonNull(queue, "queue");
+
+        HybridBudgetPlan budget = budgetCalculator.calculate(budgetInput);
+        int currentCore = executor.getCorePoolSize();
+        HybridSizingDecision decision = sizingController.decide(currentCore, budget, metrics, state, now);
+
+        applyCoreAsFixedPool(executor, decision.targetCorePoolSize());
+
+        int currentQueueSize = queue.size();
+        int appliedQueueCapacity = Math.max(decision.targetQueueCapacity(), currentQueueSize);
+        boolean queueShrinkDeferred = appliedQueueCapacity != decision.targetQueueCapacity();
+        queue.setCapacity(appliedQueueCapacity);
+
+        return new AppliedHybridResult(budget, decision, appliedQueueCapacity, queueShrinkDeferred);
+    }
+
+    private void applyCoreAsFixedPool(ThreadPoolExecutor executor, int targetCore) {
+        if (targetCore > executor.getMaximumPoolSize()) {
+            executor.setMaximumPoolSize(targetCore);
+            executor.setCorePoolSize(targetCore);
+            return;
+        }
+        executor.setCorePoolSize(targetCore);
+        executor.setMaximumPoolSize(targetCore);
+    }
+}
+
+```
+Attachment Name: AppliedHybridResult.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+public record AppliedHybridResult(
+        HybridBudgetPlan budget,
+        HybridSizingDecision decision,
+        int appliedQueueCapacity,
+        boolean queueShrinkDeferred
+) {
+}
+
+```
+Attachment Name: HybridBudgetPlan.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+public record HybridBudgetPlan(
+        int coreMin,
+        int coreMax,
+        int queueMin,
+        int queueMax
+) {
+}
+
+```
+Attachment Name: HybridMetrics.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+public record HybridMetrics(
+        long queueWaitP95Ms,
+        long execTimeP95Ms,
+        double activeRatio,
+        double rejectionRate,
+        double heapUsedRatio,
+        long gcPauseP95Ms
+) {
+
+    public HybridMetrics {
+        if (queueWaitP95Ms < 0 || execTimeP95Ms < 0 || gcPauseP95Ms < 0) {
+            throw new IllegalArgumentException("latency values must be non-negative");
+        }
+        if (activeRatio < 0 || activeRatio > 1) {
+            throw new IllegalArgumentException("activeRatio must be in [0, 1]");
+        }
+        if (rejectionRate < 0 || rejectionRate > 1) {
+            throw new IllegalArgumentException("rejectionRate must be in [0, 1]");
+        }
+        if (heapUsedRatio < 0 || heapUsedRatio > 1) {
+            throw new IllegalArgumentException("heapUsedRatio must be in [0, 1]");
+        }
+    }
+}
+
+```
+Attachment Name: HybridSizingDecision.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+public record HybridSizingDecision(
+        int targetCorePoolSize,
+        int targetQueueCapacity,
+        HybridScalingAction action,
+        String reason
+) {
+}
+
+```
+Attachment Name: HybridBudgetCalculator.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+import java.util.Objects;
+
+public class HybridBudgetCalculator {
+
+    private final HybridSizingConfig config;
+
+    public HybridBudgetCalculator(HybridSizingConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+    }
+
+    public HybridBudgetPlan calculate(HybridBudgetInput input) {
+        Objects.requireNonNull(input, "input");
+
+        int coreUpperByMem = Math.max(1,
+                (int) Math.floor((input.xmxBytes() * config.memBudgetRatio()) / input.taskP95HeapBytes()));
+        int coreUpperByCpu = Math.max(1,
+                (int) Math.floor(input.availableProcessors() * config.cpuThreadFactor()));
+
+        int baseCoreMax = clamp(config.hardMinCore(),
+                Math.min(coreUpperByMem, coreUpperByCpu),
+                config.hardMaxCore());
+        int baseCoreMin = Math.max(config.hardMinCore(),
+                (int) Math.floor(baseCoreMax * config.minCoreRatio()));
+
+        double scaleFactor = Math.pow((double) config.referenceReplica() / input.replicaCount(), config.alpha());
+        int scaledCoreMin = clamp(config.hardMinCore(),
+                (int) Math.floor(baseCoreMin * scaleFactor),
+                config.hardMaxCore());
+        int scaledCoreMax = clamp(config.hardMinCore(),
+                (int) Math.floor(baseCoreMax * scaleFactor),
+                config.hardMaxCore());
+        if (scaledCoreMin > scaledCoreMax) {
+            scaledCoreMin = scaledCoreMax;
+        }
+
+        int queueMaxByMem = Math.max(1,
+                (int) Math.floor((input.xmxBytes() * config.queueMemBudgetRatio()) / input.taskAvgHeapBytes()));
+        int queueMax = Math.min(
+                queueMaxByMem,
+                scaledCoreMax * config.queuePerThreadUpper()
+        );
+        queueMax = clamp(config.hardMinQueue(), queueMax, config.hardMaxQueue());
+
+        int queueMin = Math.max(config.hardMinQueue(), scaledCoreMin * config.queuePerThreadLower());
+        queueMin = clamp(config.hardMinQueue(), queueMin, config.hardMaxQueue());
+        if (queueMin > queueMax) {
+            queueMin = queueMax;
+        }
+
+        return new HybridBudgetPlan(scaledCoreMin, scaledCoreMax, queueMin, queueMax);
+    }
+
+    private int clamp(int min, int value, int max) {
+        return Math.min(max, Math.max(min, value));
+    }
+}
+
+```
+Attachment Name: HybridBudgetInput.java
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+```java
+package com.zhiwu.project2026.threadpool.schemec;
+
+public record HybridBudgetInput(
+        long xmxBytes,
+        int replicaCount,
+        long taskAvgHeapBytes,
+        long taskP95HeapBytes,
+        int availableProcessors
+) {
+
+    public HybridBudgetInput {
+        if (xmxBytes <= 0 || taskAvgHeapBytes <= 0 || taskP95HeapBytes <= 0) {
+            throw new IllegalArgumentException("heap values must be positive");
+        }
+        if (replicaCount <= 0 || availableProcessors <= 0) {
+            throw new IllegalArgumentException("replicaCount and availableProcessors must be positive");
+        }
+    }
+}
+
+```
+
+
+kotlin.Unit
+
+==== AgentMessage #4 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #5 ====
+User: 
+设计文档中的方案D还没有实现，现在需要将方案D也单独作为一套代码实现，并给出详细的单元测试
+Attachments:
+Attachment Name: dynamic-threadpool-autoscaling-design.md
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+````markdown
+# 线程池容量动态调整设计文档
+
+## 1. 背景与目标
+
+当前服务存在以下现实约束：
+- 服务会发生水平扩容/缩容（Pod 或实例数量变化）。
+- 单实例 JVM `-Xmx` 在不同环境下不一致，甚至会动态变更（重启后生效）。
+- 固定线程池参数（`corePoolSize`、队列容量）在不同实例规格下容易过大或过小。
+
+目标：
+- 让线程池核心线程数与队列容量可依据“实例可用内存 + 集群副本规模 + 实时负载”动态调整。
+- 保证吞吐与延迟平衡，避免 OOM、过度排队与频繁抖动。
+- 方案可灰度、可回滚、可观测。
+
+非目标：
+- 不追求完全自适应到“零人工参数”；仍保留边界与兜底阈值。
+
+## 2. 设计原则
+
+- 安全优先：任何时刻都不突破内存安全水位。
+- 平滑调整：避免每秒级频繁调参导致抖动。
+- 分层决策：先算“静态上限”（基于 `Xmx`/副本数），再做“动态微调”（基于实时指标）。
+- 可解释性：参数来源可追溯，便于排障与审计。
+
+## 3. 关键输入与指标
+
+### 3.1 静态输入（重启后变化）
+- `XmxBytes`：JVM 最大堆。
+- `replicaCount`：当前服务副本数。
+- `taskAvgHeapBytes`：单任务平均堆占用（压测/线上采样得到）。
+- `taskP95HeapBytes`：单任务 P95 堆占用。
+
+### 3.2 动态输入（运行时变化）
+- `queueWaitP95Ms`：队列等待 P95。
+- `execTimeP95Ms`：任务执行 P95。
+- `activeCount/corePoolSize`：线程繁忙度。
+- `rejectionRate`：拒绝率。
+- `heapUsedRatio`：堆使用率。
+- `gcPauseP95Ms`：GC 暂停 P95。
+
+## 4. 可行方案
+
+## 方案 A：规则驱动（Xmx + 副本数）离散分档
+
+### 思路
+按 `Xmx` 和 `replicaCount` 映射到预定义档位，定时（如 30s）校准线程池参数。
+
+### 示例规则
+- 基础线程数：`baseCore = clamp(2, cpu*2, 64)`
+- 内存约束线程上限：`memBoundCore = floor((XmxBytes * 0.25) / taskP95HeapBytes)`
+- 副本约束：`replicaFactor = sqrt(referenceReplica / replicaCount)`
+- 最终核心线程：`core = clamp(minCore, floor(min(baseCore, memBoundCore) * replicaFactor), maxCore)`
+- 队列容量：`queue = clamp(minQueue, core * queuePerThread, maxQueue)`
+
+### 优点
+- 实现快，变更风险小。
+- 参数可解释，适合先上线。
+
+### 缺点
+- 仅规则，无法及时响应瞬时流量尖峰。
+- 规则维护成本随业务复杂度上升。
+
+适用场景：初期落地、对稳定性要求高、历史数据不足。
+
+---
+
+## 方案 B：反馈闭环（基于 SLO 的控制器）
+
+### 思路
+使用控制器（P/PI/PID 的简化实现）围绕目标 SLO（如 `queueWaitP95Ms <= 100ms`）动态调节 `corePoolSize` 与 `queueCapacity`。
+
+### 控制逻辑（简化）
+- 若 `queueWaitP95Ms` 连续 N 个周期超阈值，且 `heapUsedRatio < 0.75`，增加 `core`。
+- 若 `heapUsedRatio > 0.82` 或 `gcPauseP95Ms` 超阈值，降低 `core` 并收缩队列。
+- 每次调整步长受限（如 `±10%`），并设置冷却时间（如 2~5 分钟）。
+
+### 优点
+- 能自动适应流量波动，SLO 对齐更好。
+- 比纯静态规则更节省资源。
+
+### 缺点
+- 调参复杂，需防止振荡。
+- 对监控质量要求高。
+
+适用场景：有稳定监控体系、可持续调优团队。
+
+---
+
+## 方案 C：两层混合（推荐）
+
+### 思路
+- 第一层“容量预算层”：基于 `Xmx` + `replicaCount` 算安全上限/下限。
+- 第二层“运行控制层”：在预算区间内根据实时指标微调。
+
+### 运行机制
+1. 预算层给出：`coreMin/coreMax/queueMin/queueMax`。
+2. 控制层每 30s 评估指标，只能在预算区间调整。
+3. 当 `Xmx` 或副本数变化时，重算预算并触发平滑迁移。
+
+### 优点
+- 兼顾安全性与自适应能力。
+- 比纯反馈更易控，比纯规则更智能。
+
+### 缺点
+- 架构较复杂，需要更多工程实现。
+
+适用场景：中长期生产方案。
+
+---
+
+## 方案 D：离线建模 + 在线推断
+
+### 思路
+利用历史数据训练回归模型（输入：流量、任务特征、`Xmx`、副本数；输出：线程/队列推荐值），在线周期性推断。
+
+### 优点
+- 对复杂非线性场景可能最优。
+
+### 缺点
+- 建模、特征、漂移治理成本高。
+- 可解释性与稳定性治理难度大。
+
+适用场景：高成熟度平台团队，不建议作为第一阶段。
+
+## 5. 方案对比
+
+| 维度 | 方案 A 规则驱动 | 方案 B 反馈闭环 | 方案 C 两层混合 | 方案 D 建模推断 |
+|---|---|---|---|---|
+| 实现复杂度 | 低 | 中 | 中高 | 高 |
+| 稳定性 | 高 | 中（依赖调参） | 高 | 中 |
+| 自适应能力 | 低~中 | 高 | 高 | 高 |
+| 可解释性 | 高 | 中 | 高 | 低~中 |
+| 上线风险 | 低 | 中 | 中 | 高 |
+| 推荐级别 | 短期可用 | 可选 | 强烈推荐 | 后期探索 |
+
+## 6. 推荐方案（C）详细设计
+
+### 6.1 参数模型
+
+预算层：
+- `coreUpperByMem = floor((XmxBytes * memBudgetRatio) / taskP95HeapBytes)`
+- `coreUpperByCpu = cpuCore * cpuThreadFactor`
+- `coreMax = clamp(minCore, min(coreUpperByMem, coreUpperByCpu), hardMaxCore)`
+- `coreMin = max(hardMinCore, floor(coreMax * minCoreRatio))`
+
+副本修正：
+- `scaleFactor = (referenceReplica / replicaCount)^alpha`，`alpha` 建议 `0.3~0.5`。
+- `coreMin/coreMax` 同步乘以 `scaleFactor` 后再 clamp。
+
+队列预算：
+- `queueMaxByMem = floor((XmxBytes * queueMemBudgetRatio) / taskAvgHeapBytes)`
+- `queueMax = min(queueMaxByMem, coreMax * queuePerThreadUpper)`
+- `queueMin = max(hardMinQueue, coreMin * queuePerThreadLower)`
+
+控制层（每 30s）：
+- 目标：`queueWaitP95Ms <= targetQueueWaitMs`
+- 若超标且 `activeRatio > 0.85` 且 `heapUsedRatio < heapGuardLow`，`core += stepUp`
+- 若 `heapUsedRatio > heapGuardHigh` 或 `gcPauseP95Ms` 超标，`core -= stepDown`
+- 队列与 `core` 联动，保持 `queue/core` 在阈值区间。
+
+### 6.2 防抖与保护
+- 冷却窗口：单次调整后 120s 内不再调整。
+- 步长限制：每次最多调整 `max(1, floor(core*0.1))`。
+- 熔断：出现连续 M 次 OOM 预警或高 GC，强制切换到保守配置。
+- 回退：支持动态开关，秒级回退到静态配置。
+
+### 6.3 配置示例（application.yml）
+
+```yaml
+threadpool:
+  adaptive:
+    enabled: true
+    mode: HYBRID
+    evaluate-interval: 30s
+    cooldown: 120s
+
+    hard:
+      min-core: 2
+      max-core: 64
+      min-queue: 100
+      max-queue: 20000
+
+    budget:
+      mem-budget-ratio: 0.25
+      queue-mem-budget-ratio: 0.12
+      cpu-thread-factor: 2.0
+      min-core-ratio: 0.35
+      queue-per-thread-lower: 20
+      queue-per-thread-upper: 400
+
+    scaling:
+      reference-replica: 4
+      alpha: 0.4
+
+    guard:
+      heap-guard-low: 0.75
+      heap-guard-high: 0.82
+      target-queue-wait-ms: 100
+      gc-pause-p95-ms: 200
+```
+
+### 6.4 实现建议（Spring）
+- 封装 `AdaptiveThreadPoolManager`：负责采集指标、计算目标值、执行调整。
+- 使用可动态变更队列容量的实现（如自定义 `ResizableCapacityLinkedBlockingQueue`）。
+- 线程池调整通过 `ThreadPoolExecutor#setCorePoolSize/setMaximumPoolSize`。
+- 指标接入 Micrometer + Prometheus，关键告警接入 Alertmanager。
+
+### 6.5 伪代码
+
+```java
+void reconcile() {
+    Metrics m = metricsCollector.snapshot();
+    Budget b = budgetCalculator.recalculateIfNeeded(xmx(), replicaCount());
+
+    int currentCore = executor.getCorePoolSize();
+    int targetCore = currentCore;
+
+    if (m.heapUsedRatio > cfg.heapGuardHigh || m.gcPauseP95Ms > cfg.gcPauseThreshold) {
+        targetCore = currentCore - stepDown(currentCore);
+    } else if (m.queueWaitP95Ms > cfg.targetQueueWaitMs
+            && m.activeRatio > 0.85
+            && m.heapUsedRatio < cfg.heapGuardLow) {
+        targetCore = currentCore + stepUp(currentCore);
+    }
+
+    targetCore = clamp(b.coreMin, targetCore, b.coreMax);
+    int targetQueue = clamp(b.queueMin, queueByCore(targetCore), b.queueMax);
+
+    if (cooldownPassed() && changedEnough(targetCore, targetQueue)) {
+        apply(targetCore, targetQueue);
+    }
+}
+```
+
+## 7. 落地路线图
+
+1. Phase 1（1~2 周）：上线方案 A（规则驱动），打通指标与动态配置开关。
+2. Phase 2（2~4 周）：引入方案 C 的控制层，但默认只读（不执行），先观测推荐值。
+3. Phase 3（1~2 周）：灰度开启自动调整（10% -> 30% -> 100%）。
+4. Phase 4（持续）：基于线上数据微调参数，评估是否需要方案 D。
+
+## 8. 风险与应对
+
+- 风险：控制振荡导致延迟抖动。
+  - 应对：冷却窗口 + 步长限制 + 双阈值迟滞（hysteresis）。
+
+- 风险：任务内存估计不准引起 OOM。
+  - 应对：使用 P95/P99 估计；保留 20% 安全余量；高水位强制降配。
+
+- 风险：副本数感知延迟。
+  - 应对：使用 K8s API + 本地缓存 + 超时回退默认值。
+
+- 风险：队列动态缩容行为不安全。
+  - 应对：只允许扩容实时生效，缩容通过“新建池平滑切换”完成。
+
+## 9. 验收标准
+
+- 在同等流量下，`queueWaitP95Ms` 相比静态配置下降 >= 20%。
+- 无新增 OOM，`heapUsedRatio > 0.9` 的持续时长下降 >= 30%。
+- 拒绝率在目标区间内（如 < 0.1%）。
+- 扩缩容后 5 分钟内恢复到目标 SLO。
+
+## 10. 结论
+
+- 短期可先落地方案 A，快速获得安全收益。
+- 中长期建议采用方案 C（两层混合）作为生产标准方案：
+  - 预算层确保不会越过内存与副本约束；
+  - 控制层保证在波动流量下持续贴近延迟目标。
+
+````
+
+
+kotlin.Unit
+
+==== AgentMessage #6 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #7 ====
+User: 
+当前各个方案的代码已经完整输出了，接下来需要针对各个方案做安全性和稳定性测试，请通过包括但不限于单元测试的方式完成安全性和可靠性测试，并输出报告
+
+kotlin.Unit
+
+==== AgentMessage #8 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #9 ====
+User: 
+在一个成熟的项目中，要引入新的线程池管理方案，肯定需要考虑最新侵入性，能够做到越简单，稳定性越好，侵入性越小，是一些非常重要的指标，现在需要针对各个方案针对这些指标做一个评估，并输出相关报告，使用中文输出
+
+kotlin.Unit
+
+==== AgentMessage #10 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #11 ====
+User: 
+线程池的核心线程和队列大小并不是所有时间都需要马上扩容，如果压力不大，其实完全可以不做变动，这样对于系统稳定性来说肯定是最优的，但是当系统压力过大，无法处理的时候才需要根据需要触发自动扩容，现在根据这个诉求，对我之前的设计文档做进一步优化，需要对各个方案都要做好压力管控，避免所有的扩容行为过于敏感，导致系统不稳定
+Attachments:
+Attachment Name: dynamic-threadpool-autoscaling-design.md
+Attachments Kind: Visible
+Attachments Source: User / FileChatAttachment
+Attachments Text:
+````markdown
+# 线程池容量动态调整设计文档
+
+## 1. 背景与目标
+
+当前服务存在以下现实约束：
+- 服务会发生水平扩容/缩容（Pod 或实例数量变化）。
+- 单实例 JVM `-Xmx` 在不同环境下不一致，甚至会动态变更（重启后生效）。
+- 固定线程池参数（`corePoolSize`、队列容量）在不同实例规格下容易过大或过小。
+
+目标：
+- 让线程池核心线程数与队列容量可依据“实例可用内存 + 集群副本规模 + 实时负载”动态调整。
+- 保证吞吐与延迟平衡，避免 OOM、过度排队与频繁抖动。
+- 方案可灰度、可回滚、可观测。
+
+非目标：
+- 不追求完全自适应到“零人工参数”；仍保留边界与兜底阈值。
+
+## 2. 设计原则
+
+- 安全优先：任何时刻都不突破内存安全水位。
+- 平滑调整：避免每秒级频繁调参导致抖动。
+- 分层决策：先算“静态上限”（基于 `Xmx`/副本数），再做“动态微调”（基于实时指标）。
+- 可解释性：参数来源可追溯，便于排障与审计。
+
+## 3. 关键输入与指标
+
+### 3.1 静态输入（重启后变化）
+- `XmxBytes`：JVM 最大堆。
+- `replicaCount`：当前服务副本数。
+- `taskAvgHeapBytes`：单任务平均堆占用（压测/线上采样得到）。
+- `taskP95HeapBytes`：单任务 P95 堆占用。
+
+### 3.2 动态输入（运行时变化）
+- `queueWaitP95Ms`：队列等待 P95。
+- `execTimeP95Ms`：任务执行 P95。
+- `activeCount/corePoolSize`：线程繁忙度。
+- `rejectionRate`：拒绝率。
+- `heapUsedRatio`：堆使用率。
+- `gcPauseP95Ms`：GC 暂停 P95。
+
+## 4. 可行方案
+
+## 方案 A：规则驱动（Xmx + 副本数）离散分档
+
+### 思路
+按 `Xmx` 和 `replicaCount` 映射到预定义档位，定时（如 30s）校准线程池参数。
+
+### 示例规则
+- 基础线程数：`baseCore = clamp(2, cpu*2, 64)`
+- 内存约束线程上限：`memBoundCore = floor((XmxBytes * 0.25) / taskP95HeapBytes)`
+- 副本约束：`replicaFactor = sqrt(referenceReplica / replicaCount)`
+- 最终核心线程：`core = clamp(minCore, floor(min(baseCore, memBoundCore) * replicaFactor), maxCore)`
+- 队列容量：`queue = clamp(minQueue, core * queuePerThread, maxQueue)`
+
+### 优点
+- 实现快，变更风险小。
+- 参数可解释，适合先上线。
+
+### 缺点
+- 仅规则，无法及时响应瞬时流量尖峰。
+- 规则维护成本随业务复杂度上升。
+
+适用场景：初期落地、对稳定性要求高、历史数据不足。
+
+---
+
+## 方案 B：反馈闭环（基于 SLO 的控制器）
+
+### 思路
+使用控制器（P/PI/PID 的简化实现）围绕目标 SLO（如 `queueWaitP95Ms <= 100ms`）动态调节 `corePoolSize` 与 `queueCapacity`。
+
+### 控制逻辑（简化）
+- 若 `queueWaitP95Ms` 连续 N 个周期超阈值，且 `heapUsedRatio < 0.75`，增加 `core`。
+- 若 `heapUsedRatio > 0.82` 或 `gcPauseP95Ms` 超阈值，降低 `core` 并收缩队列。
+- 每次调整步长受限（如 `±10%`），并设置冷却时间（如 2~5 分钟）。
+
+### 优点
+- 能自动适应流量波动，SLO 对齐更好。
+- 比纯静态规则更节省资源。
+
+### 缺点
+- 调参复杂，需防止振荡。
+- 对监控质量要求高。
+
+适用场景：有稳定监控体系、可持续调优团队。
+
+---
+
+## 方案 C：两层混合（推荐）
+
+### 思路
+- 第一层“容量预算层”：基于 `Xmx` + `replicaCount` 算安全上限/下限。
+- 第二层“运行控制层”：在预算区间内根据实时指标微调。
+
+### 运行机制
+1. 预算层给出：`coreMin/coreMax/queueMin/queueMax`。
+2. 控制层每 30s 评估指标，只能在预算区间调整。
+3. 当 `Xmx` 或副本数变化时，重算预算并触发平滑迁移。
+
+### 优点
+- 兼顾安全性与自适应能力。
+- 比纯反馈更易控，比纯规则更智能。
+
+### 缺点
+- 架构较复杂，需要更多工程实现。
+
+适用场景：中长期生产方案。
+
+---
+
+## 方案 D：离线建模 + 在线推断
+
+### 思路
+利用历史数据训练回归模型（输入：流量、任务特征、`Xmx`、副本数；输出：线程/队列推荐值），在线周期性推断。
+
+### 优点
+- 对复杂非线性场景可能最优。
+
+### 缺点
+- 建模、特征、漂移治理成本高。
+- 可解释性与稳定性治理难度大。
+
+适用场景：高成熟度平台团队，不建议作为第一阶段。
+
+## 5. 方案对比
+
+| 维度 | 方案 A 规则驱动 | 方案 B 反馈闭环 | 方案 C 两层混合 | 方案 D 建模推断 |
+|---|---|---|---|---|
+| 实现复杂度 | 低 | 中 | 中高 | 高 |
+| 稳定性 | 高 | 中（依赖调参） | 高 | 中 |
+| 自适应能力 | 低~中 | 高 | 高 | 高 |
+| 可解释性 | 高 | 中 | 高 | 低~中 |
+| 上线风险 | 低 | 中 | 中 | 高 |
+| 推荐级别 | 短期可用 | 可选 | 强烈推荐 | 后期探索 |
+
+## 6. 推荐方案（C）详细设计
+
+### 6.1 参数模型
+
+预算层：
+- `coreUpperByMem = floor((XmxBytes * memBudgetRatio) / taskP95HeapBytes)`
+- `coreUpperByCpu = cpuCore * cpuThreadFactor`
+- `coreMax = clamp(minCore, min(coreUpperByMem, coreUpperByCpu), hardMaxCore)`
+- `coreMin = max(hardMinCore, floor(coreMax * minCoreRatio))`
+
+副本修正：
+- `scaleFactor = (referenceReplica / replicaCount)^alpha`，`alpha` 建议 `0.3~0.5`。
+- `coreMin/coreMax` 同步乘以 `scaleFactor` 后再 clamp。
+
+队列预算：
+- `queueMaxByMem = floor((XmxBytes * queueMemBudgetRatio) / taskAvgHeapBytes)`
+- `queueMax = min(queueMaxByMem, coreMax * queuePerThreadUpper)`
+- `queueMin = max(hardMinQueue, coreMin * queuePerThreadLower)`
+
+控制层（每 30s）：
+- 目标：`queueWaitP95Ms <= targetQueueWaitMs`
+- 若超标且 `activeRatio > 0.85` 且 `heapUsedRatio < heapGuardLow`，`core += stepUp`
+- 若 `heapUsedRatio > heapGuardHigh` 或 `gcPauseP95Ms` 超标，`core -= stepDown`
+- 队列与 `core` 联动，保持 `queue/core` 在阈值区间。
+
+### 6.2 防抖与保护
+- 冷却窗口：单次调整后 120s 内不再调整。
+- 步长限制：每次最多调整 `max(1, floor(core*0.1))`。
+- 熔断：出现连续 M 次 OOM 预警或高 GC，强制切换到保守配置。
+- 回退：支持动态开关，秒级回退到静态配置。
+
+### 6.3 配置示例（application.yml）
+
+```yaml
+threadpool:
+  adaptive:
+    enabled: true
+    mode: HYBRID
+    evaluate-interval: 30s
+    cooldown: 120s
+
+    hard:
+      min-core: 2
+      max-core: 64
+      min-queue: 100
+      max-queue: 20000
+
+    budget:
+      mem-budget-ratio: 0.25
+      queue-mem-budget-ratio: 0.12
+      cpu-thread-factor: 2.0
+      min-core-ratio: 0.35
+      queue-per-thread-lower: 20
+      queue-per-thread-upper: 400
+
+    scaling:
+      reference-replica: 4
+      alpha: 0.4
+
+    guard:
+      heap-guard-low: 0.75
+      heap-guard-high: 0.82
+      target-queue-wait-ms: 100
+      gc-pause-p95-ms: 200
+```
+
+### 6.4 实现建议（Spring）
+- 封装 `AdaptiveThreadPoolManager`：负责采集指标、计算目标值、执行调整。
+- 使用可动态变更队列容量的实现（如自定义 `ResizableCapacityLinkedBlockingQueue`）。
+- 线程池调整通过 `ThreadPoolExecutor#setCorePoolSize/setMaximumPoolSize`。
+- 指标接入 Micrometer + Prometheus，关键告警接入 Alertmanager。
+
+### 6.5 伪代码
+
+```java
+void reconcile() {
+    Metrics m = metricsCollector.snapshot();
+    Budget b = budgetCalculator.recalculateIfNeeded(xmx(), replicaCount());
+
+    int currentCore = executor.getCorePoolSize();
+    int targetCore = currentCore;
+
+    if (m.heapUsedRatio > cfg.heapGuardHigh || m.gcPauseP95Ms > cfg.gcPauseThreshold) {
+        targetCore = currentCore - stepDown(currentCore);
+    } else if (m.queueWaitP95Ms > cfg.targetQueueWaitMs
+            && m.activeRatio > 0.85
+            && m.heapUsedRatio < cfg.heapGuardLow) {
+        targetCore = currentCore + stepUp(currentCore);
+    }
+
+    targetCore = clamp(b.coreMin, targetCore, b.coreMax);
+    int targetQueue = clamp(b.queueMin, queueByCore(targetCore), b.queueMax);
+
+    if (cooldownPassed() && changedEnough(targetCore, targetQueue)) {
+        apply(targetCore, targetQueue);
+    }
+}
+```
+
+## 7. 落地路线图
+
+1. Phase 1（1~2 周）：上线方案 A（规则驱动），打通指标与动态配置开关。
+2. Phase 2（2~4 周）：引入方案 C 的控制层，但默认只读（不执行），先观测推荐值。
+3. Phase 3（1~2 周）：灰度开启自动调整（10% -> 30% -> 100%）。
+4. Phase 4（持续）：基于线上数据微调参数，评估是否需要方案 D。
+
+## 8. 风险与应对
+
+- 风险：控制振荡导致延迟抖动。
+  - 应对：冷却窗口 + 步长限制 + 双阈值迟滞（hysteresis）。
+
+- 风险：任务内存估计不准引起 OOM。
+  - 应对：使用 P95/P99 估计；保留 20% 安全余量；高水位强制降配。
+
+- 风险：副本数感知延迟。
+  - 应对：使用 K8s API + 本地缓存 + 超时回退默认值。
+
+- 风险：队列动态缩容行为不安全。
+  - 应对：只允许扩容实时生效，缩容通过“新建池平滑切换”完成。
+
+## 9. 验收标准
+
+- 在同等流量下，`queueWaitP95Ms` 相比静态配置下降 >= 20%。
+- 无新增 OOM，`heapUsedRatio > 0.9` 的持续时长下降 >= 30%。
+- 拒绝率在目标区间内（如 < 0.1%）。
+- 扩缩容后 5 分钟内恢复到目标 SLO。
+
+## 10. 结论
+
+- 短期可先落地方案 A，快速获得安全收益。
+- 中长期建议采用方案 C（两层混合）作为生产标准方案：
+  - 预算层确保不会越过内存与副本约束；
+  - 控制层保证在波动流量下持续贴近延迟目标。
+
+````
+
+
+kotlin.Unit
+
+==== AgentMessage #12 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #13 ====
+User: 
+将统一扩容闸门落地成为具体代码接口并集成到各个方案中
+
+kotlin.Unit
+
+==== AgentMessage #14 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #15 ====
+User: 
+我的服务已经封装了CommonBlockQueue和LinkedBlockQueue，并且实现了队列实际大小的定时监控，以便于实时观察队列压力，现在当前的各个线程池管理策略能不能将我现有的能力加入进去，保持兼容
+
+kotlin.Unit
+
+==== AgentMessage #16 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #17 ====
+User: 
+我的两个队列的实现是：在new的时候配置了唯一的枚举类，然后作为标记，注册到一个map中，然后每分钟遍历这些队列获取当前队列的使用情况，并且在数据入队的时候，如果失败，也会记录失败数，以便于后续监控，当前各个方案的代码能不能兼容我这种监控方案
+
+kotlin.Unit
+
+==== AgentMessage #18 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #19 ====
+User: 
+我现在需要一个明确的性能测试，请针对各个方案输出单元测试完成性能测试，并给出中文版的测试结果报告
+
+kotlin.Unit
+
+==== AgentMessage #20 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #21 ====
+User: 
+继续
+
+kotlin.Unit
+
+==== AgentMessage #22 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
+==== UserMessageImpl #23 ====
+User: 
+我目前想不到其他维度的测试，针对可维护性和其他系统正式上线生产环境需要的测试，给我输出一份完整的测试报告，如果有必要，请输出单元测试代码
+
+kotlin.Unit
+
+==== AgentMessage #24 ====
+Assistant: 
+
+
+Tool use list:
+
+
+kotlin.Unit
+
