@@ -1,6 +1,7 @@
 package com.zhiwu.project2026.distributecache;
 
 import com.zhiwu.project2026.distributecache.cache.CacheKeyBuilder;
+import com.zhiwu.project2026.distributecache.config.CompareSchemeProperties;
 import com.zhiwu.project2026.distributecache.model.MeasObject;
 import com.zhiwu.project2026.distributecache.repository.MeasObjectDataRepository;
 import com.zhiwu.project2026.distributecache.repository.RedisMeasRepository;
@@ -67,6 +68,9 @@ class DistributeCachePerformanceIT {
 
     @Autowired
     private CacheKeyBuilder keyBuilder;
+
+    @Autowired
+    private CompareSchemeProperties compareSchemeProperties;
 
     @BeforeAll
     static void initSeed() {
@@ -139,7 +143,7 @@ class DistributeCachePerformanceIT {
         runWarmup(() -> redisRepository.getObjectsByOids(sample), 30);
 
         PerfStat stat = runPerf(() -> redisRepository.getObjectsByOids(sample), 500);
-        appendReport("Redis getObjectsByOids(100)", stat);
+        appendReport("[" + compareSchemeProperties.getScheme() + "] Redis getObjectsByOids(100)", stat);
     }
 
     @Test
@@ -151,7 +155,7 @@ class DistributeCachePerformanceIT {
         runWarmup(() -> dataRepository.findObjectsByOids(sample), 10);
 
         PerfStat stat = runPerf(() -> dataRepository.findObjectsByOids(sample), 120);
-        appendReport("JDBC findObjectsByOids(100)", stat);
+        appendReport("[" + compareSchemeProperties.getScheme() + "] JDBC findObjectsByOids(100)", stat);
     }
 
     @Test
@@ -162,7 +166,7 @@ class DistributeCachePerformanceIT {
 
         runWarmup(() -> queryService.queryByTask(taskKey, moType), 20);
         PerfStat stat = runPerf(() -> queryService.queryByTask(taskKey, moType), 300);
-        appendReport("QueryService queryByTask(300oids)", stat);
+        appendReport("[" + compareSchemeProperties.getScheme() + "] QueryService queryByTask(300oids)", stat);
     }
 
     @Test
