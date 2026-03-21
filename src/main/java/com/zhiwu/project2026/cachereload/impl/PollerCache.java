@@ -44,4 +44,25 @@ public class PollerCache extends LocalCache<String, Poller> {
             return Collections.unmodifiableSet(next);
         });
     }
+
+    public void removePoller(Poller poller) {
+        cache.computeIfPresent(poller.getType(), (k, oldSet) -> {
+
+            // 如果元素不存在，直接返回旧集合（避免无意义复制）
+            if (!oldSet.contains(poller)) {
+                return oldSet;
+            }
+
+            // 基于旧集合构造新集合
+            Set<Poller> newSet = new HashSet<>(oldSet);
+            newSet.remove(poller);
+
+            // 如果删除后为空，可以选择直接移除 key
+            if (newSet.isEmpty()) {
+                return null; // computeIfPresent 返回 null 会删除该 key
+            }
+
+            return Collections.unmodifiableSet(newSet);
+        });
+    }
 }
